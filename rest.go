@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strconv"
 	"strings"
@@ -28,6 +29,10 @@ type Rest struct {
 	signer  *eip712.Signer
 	Before  func(context.Context, string, string) error
 	Observe func(RequestResult)
+
+	// writes, when set by SeparateWrites, carries signed POST, PUT and DELETE requests on a
+	// connection pool of its own.
+	writes http.RoundTripper
 }
 
 func NewRest(spot bool, account, key string) (*Rest, error) {
@@ -126,6 +131,7 @@ func (a *Rest) RequestSigned(ctx context.Context, method, path string, params ur
 			return nil, err
 		}
 	}
+	signStart := time.Now()
 	// Never mutate caller-owned parameters: requests can be retried or concurrent.
 	cloned := url.Values{}
 	for k, v := range params {
@@ -151,7 +157,7 @@ func (a *Rest) RequestSigned(ctx context.Context, method, path string, params ur
 		return nil, fmt.Errorf("%w: %v", ErrNotSent, err)
 	}
 	params.Set("signature", signature)
-	return a.send(ctx, method, path, params)
+	return a.send(ctx, method, path, params, time.Since(signStart))
 }
 
 // RequestPublic performs an unsigned GET (market data, exchange info). It obeys the same
@@ -160,11 +166,12 @@ func (a *Rest) RequestPublic(ctx context.Context, path string, params url.Values
 	if err := holdErr(a.Client.BaseURL); err != nil {
 		return nil, err
 	}
-	return a.send(ctx, http.MethodGet, path, params)
+	return a.send(ctx, http.MethodGet, path, params, 0)
 }
 
-// send dispatches one request and classes the outcome.
-func (a *Rest) send(ctx context.Context, method, path string, params url.Values) ([]byte, error) {
+// send dispatches one request and classes the outcome. sign is the time RequestSigned spent
+// signing it, reported to Observe.
+func (a *Rest) send(ctx context.Context, method, path string, params url.Values, sign time.Duration) ([]byte, error) {
 	encoded := params.Encode()
 	method = strings.ToUpper(method)
 	var req *http.Request
@@ -186,10 +193,18 @@ func (a *Rest) send(ctx context.Context, method, path string, params url.Values)
 	}
 	req.Header.Set("User-Agent", eip712.USER_AGENT)
 
+	tr := &requestTrace{}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), tr.clientTrace()))
+	client := &a.Client.Client
+	if a.writes != nil && method != http.MethodGet {
+		client = &http.Client{Transport: a.writes, Timeout: a.Client.Timeout, CheckRedirect: a.Client.CheckRedirect, Jar: a.Client.Jar}
+	}
+
 	started := time.Now()
-	resp, err := a.Client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		result := RequestResult{Method: method, Path: path, Started: started, Elapsed: time.Since(started), Unknown: true}
+		tr.fill(&result, sign)
 		if a.Observe != nil {
 			a.Observe(result)
 		}
@@ -202,7 +217,8 @@ func (a *Rest) send(ctx context.Context, method, path string, params url.Values)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		result := RequestResult{Method: method, Path: path, Started: started, Elapsed: time.Since(started), Status: resp.StatusCode, Header: resp.Header.Clone(), Unknown: true}
+		result := RequestResult{Method: method, Path: path, Started: started, Elapsed: time.Since(started), Status: resp.StatusCode, Header: resp.Header.Clone(), Unknown: true, Proto: resp.Proto}
+		tr.fill(&result, sign)
 		if a.Observe != nil {
 			a.Observe(result)
 		}
@@ -213,7 +229,8 @@ func (a *Rest) send(ctx context.Context, method, path string, params url.Values)
 	// -1006 and -1007 are the venue saying it lost track of the request (unexpected backend
 	// reply, backend timeout): it may have executed.
 	unknown := resp.StatusCode >= 500 || resp.StatusCode == http.StatusRequestTimeout || api.Code == -1006 || api.Code == -1007
-	result := RequestResult{Method: method, Path: path, Started: started, Elapsed: time.Since(started), Status: resp.StatusCode, Header: resp.Header.Clone(), Unknown: unknown}
+	result := RequestResult{Method: method, Path: path, Started: started, Elapsed: time.Since(started), Status: resp.StatusCode, Header: resp.Header.Clone(), Unknown: unknown, Proto: resp.Proto}
+	tr.fill(&result, sign)
 	if a.Observe != nil {
 		a.Observe(result)
 	}

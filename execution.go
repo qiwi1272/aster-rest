@@ -17,6 +17,18 @@ type RequestResult struct {
 	Status       int
 	Header       http.Header
 	Unknown      bool
+
+	// Sign is the time spent building and EIP-712 signing the request; zero for public requests.
+	// Send runs from Started until the request is fully written, so it includes waiting for a
+	// connection, and any dial and TLS handshake. Ack runs from then until the response body is
+	// read: the venue's turnaround plus the network. Send+Ack is Elapsed; Sign comes before Started.
+	// If the request failed before it was fully written, Send is all of Elapsed and Ack is zero.
+	Sign, Send, Ack time.Duration
+	// The connection the request went out on: Reused is false when it was dialed for this request;
+	// Conn is its local address, so results with the same Conn shared one connection.
+	Reused bool
+	Conn   string
+	Proto  string // "HTTP/2.0" or "HTTP/1.1"; empty if no response arrived
 }
 type APIError struct {
 	Code    int    `json:"code"`
