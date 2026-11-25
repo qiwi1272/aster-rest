@@ -208,6 +208,33 @@ func TestBatchModifyMismatchIsUnknown(t *testing.T) {
 	}
 }
 
+func TestBatchPlaceAcceptedButUnmatchedIsUnknown(t *testing.T) {
+	m := testMarket()
+	orders := []LimitOrderRequest{
+		NewLimitOrderPerp(m, OrderSideBuy, TimeInForceGTX, decimal.NewFromInt(1), decimal.NewFromInt(2000), false),
+		NewLimitOrderPerp(m, OrderSideSell, TimeInForceGTX, decimal.NewFromInt(1), decimal.NewFromInt(2001), false),
+	}
+	cases := map[string]string{
+		"unreadable":     `<html>gateway</html>`,
+		"not a list":     `{"orderId":1}`,
+		"wrong length":   `[{"orderId":1,"status":"NEW"}]`,
+		"missing id":     `[{"orderId":1,"status":"NEW"},{"status":"NEW"}]`,
+		"bad member":     `[{"orderId":1,"status":"NEW"},{"orderId":"x"}]`,
+		"empty reply":    ``,
+		"too many items": `[{"orderId":1},{"orderId":2},{"orderId":3}]`,
+	}
+	for name, body := range cases {
+		r := testRest(t, func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(body)) })
+		_, err := BatchOrderLimitResults(context.Background(), r, orders)
+		if !IsUnknown(err) || IsDefinitiveReject(err) {
+			t.Errorf("%s: %v (IsUnknown=%v)", name, err, IsUnknown(err))
+		}
+		if _, err := BatchOrderLimit(context.Background(), r, orders); !IsUnknown(err) {
+			t.Errorf("%s via BatchOrderLimit: %v", name, err)
+		}
+	}
+}
+
 func TestObserveTiming(t *testing.T) {
 	const venue = 30 * time.Millisecond
 	r := testRest(t, func(w http.ResponseWriter, _ *http.Request) {

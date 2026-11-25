@@ -284,33 +284,9 @@ func BatchOrderLimitResults(ctx context.Context, client *Rest, orders []LimitOrd
 	if err != nil {
 		return nil, err
 	}
-	var members []json.RawMessage
-	if err = json.Unmarshal(raw, &members); err != nil {
-		return nil, err
-	}
-	if len(members) != len(orders) {
-		return nil, errors.New("batch response length mismatch; outcome unknown")
-	}
-	out := make([]BatchOrderResult, len(members))
-	for i, r := range members {
-		var e APIError
-		if err = json.Unmarshal(r, &e); err != nil {
-			return nil, err
-		}
-		if e.Code < 0 {
-			out[i].Error = &e
-			continue
-		}
-		var o OrderResponsePerp
-		if err = json.Unmarshal(r, &o); err != nil {
-			return nil, err
-		}
-		if o.OrderId == 0 {
-			return nil, errors.New("missing batch order id; outcome unknown")
-		}
-		out[i].Order = &o
-	}
-	return out, nil
+	// A 200 reply that is unreadable, the wrong length or missing an order id is an
+	// unknown-outcome *APIError (IsUnknown): the venue accepted the batch, so orders may be live.
+	return batchMembers(raw, len(orders))
 }
 func BatchOrderLimit(ctx context.Context, client *Rest, orders []LimitOrderRequest) ([]*OrderResponsePerp, error) {
 	results, err := BatchOrderLimitResults(ctx, client, orders)
